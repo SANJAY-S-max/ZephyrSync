@@ -1,0 +1,202 @@
+================================================================================
+                         BYTESYNC - ULTIMATE PROJECT EXPLANATION
+================================================================================
+
+This document provides a highly detailed, file-by-file, code-level breakdown of 
+the ByteSync project. Use this to explain every technical decision, library, 
+and file structure to your coordinator.
+
+================================================================================
+PART 1: PROJECT SUMMARY & ARCHITECTURE
+================================================================================
+ByteSync is a high-performance, local-network (LAN) file-sharing application.
+It is built using a modified MERN stack:
+- Database: Neon PostgreSQL (replacing MongoDB for better relational data integrity)
+- Backend: Express.js (Node.js framework)
+- Frontend: React.js (Bootstrapped with Vite, styled with TailwindCSS v4)
+- ORM: Prisma (Type-safe database queries)
+
+Architecture Flow:
+The app runs on two ports during development (5000 for backend, 5173 for frontend).
+In production, the React frontend is compiled into static HTML/JS files, which 
+are then served directly by the Express backend on port 5000. This means users 
+only need to connect to ONE port (e.g., http://192.168.1.15:5000) to use the app.
+
+================================================================================
+PART 2: LIBRARIES, DEPENDENCIES, AND RESOURCES
+================================================================================
+
+--- BACKEND LIBRARIES (server/package.json) ---
+1. express: The core web server framework. It handles HTTP requests (GET, POST).
+2. cors: Cross-Origin Resource Sharing. Allows the frontend to communicate with the backend even if they are on different ports.
+3. helmet: Secures Express apps by setting various HTTP headers (prevents clickjacking, etc).
+4. dotenv: Loads environment variables from the `.env` file into `process.env`.
+5. prisma / @prisma/client: The ORM. Translates JavaScript code into SQL queries for Neon Postgres.
+6. bcryptjs: A cryptographic library used to salt and hash user passwords.
+7. jsonwebtoken (JWT): Used to generate secure, encrypted session tokens for logged-in users.
+8. multer: Middleware for handling `multipart/form-data`. It intercepts file uploads and buffers them into memory before we save them.
+9. zod: A schema declaration and validation library. Used to ensure environment variables and API request bodies are exactly the correct data type.
+10. cookie-parser: Parses cookies attached to the client request object. Required to read the HTTP-only JWT cookies.
+11. uuid: Generates unique string identifiers (v4) for file uploads and session tracking.
+
+--- FRONTEND LIBRARIES (client/package.json) ---
+1. react / react-dom: The core library for building the User Interface using components.
+2. vite: The build tool and development server. It compiles React much faster than Create-React-App.
+3. tailwindcss / @tailwindcss/postcss: A utility-first CSS framework. We use the brand-new version 4, which uses native CSS variables instead of heavy config files.
+4. react-router-dom: Enables client-side routing. Allows navigating between "Dashboard" and "Settings" without reloading the browser window.
+5. axios: An HTTP client used to send GET/POST requests to the Express backend.
+6. lucide-react: A beautifully designed SVG icon library (provides icons for files, folders, settings).
+7. date-fns: A library for manipulating JavaScript dates (used to display "2 hours ago" instead of raw timestamps).
+8. clsx / tailwind-merge: Utility functions used to conditionally merge Tailwind classes together safely.
+
+--- RESOURCES & ASSETS ---
+- Favicon: A completely custom, SVG-based vector graphic located in `client/public/favicon.svg`.
+- Fonts: Uses the 'Inter' system font stack for a premium, clean look.
+
+================================================================================
+PART 3: FILE-BY-FILE CODE EXPLANATION (Top to Bottom)
+================================================================================
+
+--------------------------------------------------
+DATABASE TIER
+--------------------------------------------------
+File: `prisma/schema.prisma`
+Explanation: This is the blueprint for the database.
+- `User` model: Stores users. Contains fields for `id`, `username`, `passwordHash`, and `role` (ADMIN vs USER).
+- `ServerSetting` model: A singleton table that stores the global state of the app (e.g., `permissionMode` which can be READ_ONLY, DOWNLOAD, or UPLOAD_DOWNLOAD).
+- `File` model: Stores file metadata. Contains `originalName`, `storedName`, `mimeType`, `extension`, and `size`. Note: `size` uses `BigInt` because files can exceed the standard 32-bit integer limit (2GB+).
+- `ActivityLog` model: Stores a history of every action taken in the app for auditing (e.g., "User Admin uploaded File X").
+
+--------------------------------------------------
+BACKEND TIER (server/src/*)
+--------------------------------------------------
+File: `server/src/app.ts`
+Explanation: The main entry point for the backend server. 
+- Lines 1-20: Imports libraries and sets up security middleware (helmet, cors, cookie-parser).
+- Lines 22-29: Defines the main API routes (`/api`) and a special `/api/server/info` route.
+- Lines 24-30 (Info Route): This block uses Node's `os.networkInterfaces()` to scan the computer's hardware, filter out virtual machines, and find the exact physical WiFi IP address. This is sent to the frontend so it can display the shareable URL.
+- Lines 31-37 (Static Serving): Tells Express to look in the `client/dist` folder and serve the React HTML/JS files to anyone who connects.
+- Lines 51-62: Starts the server listening on `0.0.0.0` (all network interfaces).
+
+File: `server/src/config/env.ts`
+Explanation: Uses `zod` to validate the `.env` file. If a required variable (like `DATABASE_URL`) is missing, the server crashes immediately with a helpful error rather than failing silently later.
+
+File: `server/src/controllers/auth.controller.ts`
+Explanation: Handles login, logout, and session verification.
+- `login()`: Searches for the username via Prisma. Uses `bcryptjs.compare()` to verify the password. If correct, uses `jwt.sign()` to create a token, and `res.cookie()` to send it back securely.
+- `me()`: Verifies the JWT cookie. If valid, returns the user's data (without the password) so React knows who is logged in.
+
+File: `server/src/controllers/file.controller.ts`
+Explanation: The traffic cop for file uploads and downloads.
+- `initUpload()`: Checks if uploads are allowed by the admin. Validates the file extension against `.env`. Creates a database record with status 'UPLOADING'.
+- `uploadChunk()`: Receives a piece of a file via Multer and passes it to the `FileService`.
+- `completeUpload()`: Called when all chunks are sent. Tells the service to stitch them together.
+- `download()`: Finds the physical file path, creates a ReadStream, and pipes the raw bytes directly to the Express `res` (Response) object so the browser starts downloading.
+
+File: `server/src/services/file.storage.service.ts`
+Explanation: Handles raw hard-drive operations.
+- `saveChunk()`: Writes a piece of a file to the `storage/chunks` folder. Contains strict checks to prevent Path Traversal (hackers trying to write to `C:/Windows`).
+- `assembleFile()`: Opens a `WriteStream` to `storage/files`. Loops through every chunk in order, appends them to the new file, hashes the file for integrity, and deletes the temporary chunks.
+
+--------------------------------------------------
+FRONTEND TIER (client/src/*)
+--------------------------------------------------
+File: `client/src/main.tsx` & `App.tsx`
+Explanation: The React entry point. `main.tsx` renders the `<App />` component into the HTML DOM. `App.tsx` wraps the whole application in the `<AuthProvider>` and `<BrowserRouter>`, defining which URLs load which pages (e.g., `<Route path="/files" element={<FileManager />} />`).
+
+File: `client/src/context/AuthContext.tsx`
+Explanation: Global State Management.
+- Uses React's `createContext` and `useState`.
+- On startup, `fetchSession()` uses Axios to call `/api/auth/me`, `/api/server/settings`, and `/api/server/info`.
+- It stores the logged-in user, the server's permission mode, and the server's LAN IP address in a global state that any component can access using the `useAuth()` hook.
+
+File: `client/src/services/api.ts`
+Explanation: Configures Axios.
+- Creates an Axios instance with `withCredentials: true` (crucial for sending the JWT cookie automatically).
+- Sets up an Interceptor: If any API call fails with a `401 Unauthorized` error, it automatically redirects the user to the `/login` page.
+
+File: `client/src/pages/FileManager.tsx`
+Explanation: The core file uploading screen.
+- State: Tracks the list of files, the upload progress percentage, and drag-and-drop state.
+- `handleDrop()` & `handleFileSelect()`: Reads the selected files.
+- `uploadFile()`: The core chunking logic. Uses `file.slice(start, end)` to break massive files into 4MB pieces. Uses a `for` loop to send each piece via an Axios `FormData` POST request. Updates a progress bar state after each chunk completes.
+
+File: `client/src/pages/Dashboard.tsx` & `Activity.tsx`
+Explanation: UI screens. Dashboard fetches overall statistics (Total Files, Total Storage) from the database and maps them to visual cards. Activity maps over the `ActivityLog` array and uses the `lucide-react` icons and `date-fns` to render a beautiful timeline of events.
+
+File: `client/src/components/TopBar.tsx`
+Explanation: The top navigation header.
+- Imports `useAuth()` to get the `serverInfo.primaryLanIP`.
+- Reads `window.location.port` to figure out if you are on port 5000 or 5173.
+- Combines them together to render a shareable link (e.g., `192.168.1.15:5173`).
+- Contains a "Copy" button that writes that URL directly to the user's clipboard using `navigator.clipboard.writeText()`.
+
+File: `client/src/index.css`
+Explanation: The core styling file.
+- Imports the Tailwind v4 engine using `@import "tailwindcss";`
+- Under `@layer base`, it defines CSS Custom Properties (e.g., `--primary: 221.2 83.2% 53.3%;`) which dictates the exact hue of blue used throughout the app.
+- Contains the `.dark` class block, which flips those variables to dark mode colors.
+
+================================================================================
+PART 4: DEEP DIVE - HOW FILE SHARING & NETWORKING WORKS IN BYTESYNC
+================================================================================
+If your coordinator asks exactly *how* ByteSync shares files across the network 
+without breaking, here is the master breakdown.
+
+A. THE NETWORKING FOUNDATION
+ByteSync operates using HTTP/1.1 over TCP/IP across your Local Area Network (WiFi 
+or Ethernet). 
+- Network Binding: The Express server specifically calls `app.listen(5000, '0.0.0.0')`. 
+  The '0.0.0.0' address is a special networking wildcard. It tells the Node.js 
+  server to listen on ALL available network interfaces (your WiFi card, your 
+  Ethernet adapter) rather than just `127.0.0.1` (which only listens to traffic 
+  originating from inside the laptop itself).
+- CORS (Cross-Origin Resource Sharing): Configured in `app.ts` (`app.use(cors())`). 
+  This security feature ensures that if someone on your network tries to make 
+  malicious API requests to your laptop from a random website on their phone, the 
+  browser will block it. It only allows requests originating from the ByteSync UI.
+
+B. THE UPLOAD STRATEGY (Chunked Multipart Uploads)
+We cannot just send a 5GB video file in a single HTTP request. Doing so would:
+1. Cause the browser to run out of RAM and crash.
+2. Hit the default Express payload size limit (usually 50MB) and fail.
+3. Waste hours of time if the WiFi drops for a second at 99%, forcing a total restart.
+
+Instead, ByteSync uses "Chunking":
+1. JavaScript's File API allows us to treat a file as a `Blob` (Binary Large Object).
+2. The React frontend uses the `file.slice(start, end)` method to slice the 5GB 
+   file into tiny 4MB pieces instantly, without copying the file in memory.
+3. We loop through these pieces, wrapping each piece in a `FormData` object.
+4. Axios sends an HTTP POST request to `/api/files/upload/chunk` with the 
+   `Content-Type` set to `multipart/form-data`.
+5. On the backend, the `multer` library intercepts this multipart request, reads 
+   the raw binary buffer, and passes it to our `FileStorageService`.
+6. Node.js uses `fs.promises.writeFile()` to write each 4MB chunk directly to 
+   the temporary `storage/chunks` directory.
+7. Once React finishes sending all chunks, it hits the `/complete` endpoint.
+8. Node.js opens a `fs.createWriteStream` and loops through all the temporary 
+   chunks on disk, appending them into one final massive file in `storage/files`.
+
+C. THE DOWNLOAD STRATEGY (HTTP Streams)
+When someone wants to download a 5GB file from you, we cannot load the 5GB file 
+into Node.js RAM and send it. It would instantly crash the server.
+
+Instead, ByteSync uses "Streaming":
+1. When the Express `download()` route is hit, it verifies the user has permission.
+2. Express sets the `Content-Disposition: attachment` HTTP header. This tells 
+   the phone/client browser: "Do NOT try to display this in a tab, pop up a 
+   Save As/Download dialog immediately."
+3. Node.js uses `fs.createReadStream(filePath)`. This opens the file on the hard 
+   drive but only reads a tiny buffer (about 64KB) at a time.
+4. Node.js uses `readStream.pipe(res)`. This acts like a digital water hose. It 
+   reads 64KB from the hard drive, streams it directly over the WiFi via the 
+   Express `res` (Response) object, and immediately flushes it from RAM.
+5. This allows 10 users to download a 5GB file simultaneously from your laptop, 
+   using almost zero RAM!
+
+================================================================================
+CONCLUSION
+================================================================================
+ByteSync is a secure, professionally architected application. It uses JWTs and 
+Bcrypt for security, Chunked Uploads and Node.js Streams for massive scalability, 
+and a strict React/Vite/Tailwind v4 stack for a premium user experience.
